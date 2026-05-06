@@ -678,6 +678,49 @@
     hr.divider { border: none; border-top: 1px solid var(--border); margin: 4px 0 16px; }
     .feed-stack { display: flex; flex-direction: column; gap: 14px; }
 
+    /* ── Twoje statystyki (na górze feeda) ── */
+    .my-stats {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px 16px;
+      margin-bottom: 16px;
+      box-shadow: var(--shadow-sm);
+      display: grid;
+      grid-template-columns: repeat(4, 1fr);
+      gap: 10px;
+      animation: fadeInUp 0.25s ease-out both;
+    }
+    .my-stat-tile {
+      text-align: center;
+      padding: 6px 4px;
+      border-radius: 8px;
+      transition: background var(--transition);
+    }
+    .my-stat-tile:hover { background: var(--surface-2); }
+    .my-stat-icon {
+      font-size: 1.4rem;
+      display: block;
+      margin-bottom: 4px;
+      line-height: 1;
+    }
+    .my-stat-value {
+      font-size: 1.45rem;
+      font-weight: 800;
+      color: var(--text);
+      line-height: 1.1;
+    }
+    .my-stat-label {
+      font-size: 0.7rem;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.4px;
+      margin-top: 3px;
+      font-weight: 600;
+    }
+    .my-stat-tile.rank   .my-stat-value { color: var(--accent); }
+    .my-stat-tile.streak.active .my-stat-value { color: #f97316; }
+
     /* ── Mini-ranking dla wybranego przedmiotu ── */
     .subject-mini-ranking {
       background: var(--surface);
@@ -1278,6 +1321,11 @@
     .card { padding: 16px 14px; border-radius: 12px; }
     .card h2 { font-size: 0.97rem; }
 
+    /* My stats — 2 kolumny na mobile */
+    .my-stats { grid-template-columns: repeat(2, 1fr); padding: 12px; gap: 8px; }
+    .my-stat-icon  { font-size: 1.2rem; }
+    .my-stat-value { font-size: 1.25rem; }
+
     /* Proof cards */
     .proof-card { padding: 14px 14px 16px; border-radius: 12px; }
     .proof-card .proof-title { font-size: 1rem; }
@@ -1498,6 +1546,7 @@
 
   <!-- ── Feed ── -->
   <section id="page-feed">
+    <div id="my-stats" class="my-stats hidden"></div>
     <div id="featured-section" class="hidden"></div>
     <p class="section-heading">Feed osiągnięć</p>
     <div class="filter-row" id="filter-row">
@@ -2226,6 +2275,85 @@
     allProofs = scored;
     renderFeed(currentFilter === "all" ? allProofs : allProofs.filter(p => p.category === currentFilter));
     renderSubjectMiniRanking(currentFilter);
+    renderMyStats();
+  }
+
+  // ══════════════════════════════════════════
+  //  TWOJE STATYSTYKI (widget na górze feeda)
+  //  Liczone client-side z allProofs:
+  //   - liczba moich proofów
+  //   - sumaryczne lajki
+  //   - miejsce w rankingu (proofy×5 + lajki×2)
+  //   - streak: ile dni z rzędu z proofem (do dziś
+  //     lub wczoraj — żeby nie zerować zaraz po północy)
+  // ══════════════════════════════════════════
+  function renderMyStats() {
+    const wrap = document.getElementById("my-stats");
+    if (!wrap) return;
+
+    if (!user || !allProofs.length) {
+      wrap.classList.add("hidden");
+      wrap.innerHTML = "";
+      return;
+    }
+
+    const myProofs = allProofs.filter(p => p.user_id === user.id);
+    const myProofCount = myProofs.length;
+    const myLikes = myProofs.reduce((s, p) => s + (p.likes?.[0]?.count || 0), 0);
+
+    // Ranking — wszyscy z aktywnymi proofami (odpowiada głównemu leaderboard
+    // dla score>0; userzy z 0 proofami nie wpływają na pozycje aktywnych).
+    const allStats = new Map();
+    allProofs.forEach(p => {
+      const cur = allStats.get(p.user_id) || { proofs: 0, likes: 0 };
+      cur.proofs += 1;
+      cur.likes  += (p.likes?.[0]?.count || 0);
+      allStats.set(p.user_id, cur);
+    });
+    const ranked = [...allStats.entries()]
+      .map(([id, s]) => ({ id, score: s.proofs * 5 + s.likes * 2 }))
+      .sort((a, b) => b.score - a.score);
+    const myIdx = ranked.findIndex(r => r.id === user.id);
+    const myRank = myIdx >= 0 ? myIdx + 1 : null;
+
+    // Streak — kolejne dni z conajmniej jednym proofem,
+    // licząc od dziś (lub wczoraj jeśli dzisiaj brak)
+    const dayKey = ms => {
+      const d = new Date(ms); d.setHours(0, 0, 0, 0);
+      return d.getTime();
+    };
+    const myDays = new Set(myProofs.map(p => dayKey(new Date(p.created_at))));
+    const todayKey = dayKey(Date.now());
+    const DAY_MS = 86400000;
+    let streak = 0;
+    let cursor = myDays.has(todayKey) ? todayKey : todayKey - DAY_MS;
+    while (myDays.has(cursor)) { streak++; cursor -= DAY_MS; }
+
+    const streakActive = streak > 0;
+
+    wrap.classList.remove("hidden");
+    wrap.innerHTML = `
+      <div class="my-stat-tile">
+        <span class="my-stat-icon">📄</span>
+        <div class="my-stat-value">${myProofCount}</div>
+        <div class="my-stat-label">Proofy</div>
+      </div>
+      <div class="my-stat-tile">
+        <span class="my-stat-icon">❤️</span>
+        <div class="my-stat-value">${myLikes}</div>
+        <div class="my-stat-label">Lajki</div>
+      </div>
+      <div class="my-stat-tile rank">
+        <span class="my-stat-icon">🏆</span>
+        <div class="my-stat-value">${myRank ? `#${myRank}` : "—"}</div>
+        <div class="my-stat-label">${myRank ? `z ${ranked.length}` : "Brak proofów"}</div>
+      </div>
+      <div class="my-stat-tile streak${streakActive ? " active" : ""}">
+        <span class="my-stat-icon">${streakActive ? "🔥" : "💤"}</span>
+        <div class="my-stat-value">${streak}</div>
+        <div class="my-stat-label">Streak ${streak === 1 ? "dzień" : "dni"}</div>
+      </div>
+    `;
   }
 
   function renderFeed(data) {
