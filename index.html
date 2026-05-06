@@ -166,7 +166,7 @@
 
     /* ── Layout ── */
     main {
-      max-width: 720px;
+      max-width: 880px;
       margin: 28px auto;
       padding: 0 16px;
       display: flex;
@@ -678,6 +678,64 @@
     hr.divider { border: none; border-top: 1px solid var(--border); margin: 4px 0 16px; }
     .feed-stack { display: flex; flex-direction: column; gap: 14px; }
 
+    /* ── Mini-ranking dla wybranego przedmiotu ── */
+    .subject-mini-ranking {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 14px 16px;
+      margin-bottom: 14px;
+      box-shadow: var(--shadow-sm);
+      animation: fadeInUp 0.25s ease-out both;
+    }
+    .subject-mini-ranking-header {
+      display: flex; align-items: baseline; justify-content: space-between;
+      gap: 10px; margin-bottom: 10px; flex-wrap: wrap;
+    }
+    .subject-mini-ranking-title {
+      font-size: 0.95rem; font-weight: 700; color: var(--text);
+    }
+    .subject-mini-ranking-sub {
+      font-size: 0.72rem; color: var(--text-muted);
+    }
+    .subject-mini-list {
+      list-style: none; display: flex; flex-direction: column; gap: 4px;
+    }
+    .subject-mini-item {
+      display: flex; align-items: center; gap: 10px;
+      padding: 8px 10px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background var(--transition), transform var(--transition);
+    }
+    .subject-mini-item:hover { background: var(--surface-2); transform: translateX(3px); }
+    .subject-mini-pos {
+      width: 26px; flex-shrink: 0;
+      font-weight: 700; font-size: 0.88rem;
+      text-align: center; color: var(--text-muted);
+    }
+    .subject-mini-avatar {
+      width: 32px; height: 32px;
+      border-radius: 50%;
+      background: var(--accent-bg); color: var(--accent);
+      display: flex; align-items: center; justify-content: center;
+      font-weight: 700; font-size: 0.8rem;
+      overflow: hidden; flex-shrink: 0;
+    }
+    .subject-mini-avatar img { width: 100%; height: 100%; object-fit: cover; }
+    .subject-mini-info { flex: 1; min-width: 0; }
+    .subject-mini-name {
+      font-weight: 600; font-size: 0.9rem; color: var(--text);
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    }
+    .subject-mini-stats {
+      font-size: 0.72rem; color: var(--text-muted); margin-top: 1px;
+    }
+    .subject-mini-score {
+      font-weight: 700; font-size: 1rem;
+      color: var(--accent); flex-shrink: 0;
+    }
+
     /* ── Teacher panel ── */
     .teacher-student-card {
       display: flex;
@@ -827,7 +885,7 @@
 
     .proof-card-img-wrap img {
       width: 100%;
-      height: 240px;
+      height: 340px;
       object-fit: cover;
       display: block;
       transition: transform 0.3s ease, opacity var(--transition);
@@ -868,7 +926,7 @@
     .proof-card-gallery img {
       flex-shrink: 0;
       width: 72%;
-      height: 220px;
+      height: 320px;
       object-fit: cover;
       scroll-snap-align: start;
       cursor: zoom-in;
@@ -1457,6 +1515,7 @@
       <button class="btn-filter" onclick="filterFeed('wf')">🏃 WF</button>
       <button class="btn-filter" onclick="filterFeed('inne')">📌 Inne</button>
     </div>
+    <div id="subject-mini-ranking" class="subject-mini-ranking hidden"></div>
     <div id="feed-loading" class="state-msg">Ładowanie…</div>
     <div id="feed-empty"   class="state-msg hidden">Brak proofów. Bądź pierwszy!</div>
     <div id="feed"         class="feed-stack"></div>
@@ -1744,6 +1803,7 @@
   let currentFilter     = "all";
   let currentProjectId  = null;     // projekt wybrany przez "Dodaj etap"
   let allProofs         = [];       // kopia całego feeda do filtrowania
+  let profileMap        = new Map(); // user_id → {username, avatar_url} (zasilane przez loadProofs)
   let myLikedIds        = new Set();
   let myFollowingIds    = new Set();
   let realtimeChannel   = null;     // kanał Supabase Realtime (likes/comments/notifications)
@@ -2130,11 +2190,15 @@
 
     if (!data || data.length === 0) { emptyEl.classList.remove("hidden"); return; }
 
-    // Pobierz xp autorów (jeden request, nie N+1)
+    // Pobierz xp autorów (jeden request, nie N+1) + dane do mini-rankingu
     const authorIds = [...new Set(data.map(p => p.user_id))];
     const { data: profiles } = await supabaseClient
-      .from("profiles").select("id, xp").in("id", authorIds);
+      .from("profiles").select("id, xp, username, avatar_url").in("id", authorIds);
     const xpMap = new Map((profiles || []).map(p => [p.id, p.xp || 0]));
+    profileMap = new Map((profiles || []).map(p => [p.id, {
+      username:   p.username || p.id.slice(0, 8),
+      avatar_url: p.avatar_url || null
+    }]));
 
     // Pobierz przedmioty nauczycieli do boostowania feedu
     const { data: teacherProfiles } = await supabaseClient
@@ -2161,6 +2225,7 @@
 
     allProofs = scored;
     renderFeed(currentFilter === "all" ? allProofs : allProofs.filter(p => p.category === currentFilter));
+    renderSubjectMiniRanking(currentFilter);
   }
 
   function renderFeed(data) {
@@ -2195,6 +2260,85 @@
       : allProofs.filter(p => p.category === category);
 
     renderFeed(toRender);
+    renderSubjectMiniRanking(category);
+  }
+
+  // ══════════════════════════════════════════
+  //  MINI-RANKING DLA WYBRANEGO PRZEDMIOTU
+  //  Top 5 osób z największym dorobkiem w danej
+  //  kategorii (proofy×5 + lajki×2). Liczone
+  //  client-side z allProofs — bez extra requestów.
+  // ══════════════════════════════════════════
+  function renderSubjectMiniRanking(category) {
+    const wrap = document.getElementById("subject-mini-ranking");
+    if (!wrap) return;
+
+    if (category === "all" || !allProofs.length) {
+      wrap.classList.add("hidden");
+      wrap.innerHTML = "";
+      return;
+    }
+
+    const subjectProofs = allProofs.filter(p => p.category === category);
+    if (subjectProofs.length === 0) {
+      wrap.classList.add("hidden");
+      wrap.innerHTML = "";
+      return;
+    }
+
+    const stats = new Map(); // user_id -> {proofs, likes}
+    subjectProofs.forEach(p => {
+      const cur = stats.get(p.user_id) || { proofs: 0, likes: 0 };
+      cur.proofs += 1;
+      cur.likes  += (p.likes?.[0]?.count || 0);
+      stats.set(p.user_id, cur);
+    });
+
+    const ranked = [...stats.entries()]
+      .map(([id, s]) => {
+        const prof = profileMap.get(id) || { username: id.slice(0, 8), avatar_url: null };
+        return {
+          id, username: prof.username, avatar_url: prof.avatar_url,
+          proofs: s.proofs, likes: s.likes,
+          score: s.proofs * 5 + s.likes * 2,
+        };
+      })
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 5);
+
+    const medals = ["🥇", "🥈", "🥉"];
+    const label  = CATEGORIES[category] || category;
+
+    wrap.classList.remove("hidden");
+    wrap.innerHTML = `
+      <div class="subject-mini-ranking-header">
+        <div class="subject-mini-ranking-title">🏆 Top 5 — ${escapeHtml(label)}</div>
+        <div class="subject-mini-ranking-sub">proofy×5 + lajki×2</div>
+      </div>
+      <ol class="subject-mini-list">
+        ${ranked.map((e, i) => `
+          <li class="subject-mini-item" data-uid="${escapeHtml(e.id)}" data-uname="${escapeHtml(e.username)}">
+            <span class="subject-mini-pos">${medals[i] ?? `#${i + 1}`}</span>
+            <div class="subject-mini-avatar">
+              ${e.avatar_url
+                ? `<img src="${escapeHtml(e.avatar_url)}" alt="" />`
+                : escapeHtml((e.username[0] || "?").toUpperCase())}
+            </div>
+            <div class="subject-mini-info">
+              <div class="subject-mini-name">${escapeHtml(e.username)}</div>
+              <div class="subject-mini-stats">📄 ${e.proofs} · ❤ ${e.likes}</div>
+            </div>
+            <div class="subject-mini-score">${e.score}</div>
+          </li>
+        `).join("")}
+      </ol>
+    `;
+
+    wrap.querySelectorAll(".subject-mini-item").forEach(li => {
+      li.addEventListener("click", () => {
+        showPublicProfile(li.dataset.uid, li.dataset.uname);
+      });
+    });
   }
 
   // ══════════════════════════════════════════
