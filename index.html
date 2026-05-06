@@ -2239,40 +2239,28 @@
 
     if (!data || data.length === 0) { emptyEl.classList.remove("hidden"); return; }
 
-    // Pobierz xp autorów (jeden request, nie N+1) + dane do mini-rankingu
+    // Profile autorów — potrzebne do mini-rankingu (avatar + nick)
     const authorIds = [...new Set(data.map(p => p.user_id))];
     const { data: profiles } = await supabaseClient
-      .from("profiles").select("id, xp, username, avatar_url").in("id", authorIds);
-    const xpMap = new Map((profiles || []).map(p => [p.id, p.xp || 0]));
+      .from("profiles").select("id, username, avatar_url").in("id", authorIds);
     profileMap = new Map((profiles || []).map(p => [p.id, {
       username:   p.username || p.id.slice(0, 8),
       avatar_url: p.avatar_url || null
     }]));
 
-    // Pobierz przedmioty nauczycieli do boostowania feedu
-    const { data: teacherProfiles } = await supabaseClient
-      .from("profiles").select("teacher_subjects").eq("role", "teacher");
-    const taughtSubjects = new Set(
-      (teacherProfiles || []).flatMap(t =>
-        Array.isArray(t.teacher_subjects) ? t.teacher_subjects : []
-      )
-    );
+    // Sortowanie feeda: priorytet ma liczba komentarzy, potem lajki,
+    // potem świeżość (żeby starocie z dużą historią nie zalegały na górze).
+    const sorted = [...data].sort((a, b) => {
+      const ca = a.comments?.[0]?.count || 0;
+      const cb = b.comments?.[0]?.count || 0;
+      if (ca !== cb) return cb - ca;
+      const la = a.likes?.[0]?.count || 0;
+      const lb = b.likes?.[0]?.count || 0;
+      if (la !== lb) return lb - la;
+      return new Date(b.created_at) - new Date(a.created_at);
+    });
 
-    // Scoring: lajki×3 + komentarze×5 + świeżość (max 10) + xp_autora/50 + boost nauczyciela×20
-    const now = Date.now();
-    const scored = data.map(p => {
-      const daysOld     = (now - new Date(p.created_at)) / 86400000;
-      const likeCount   = p.likes?.[0]?.count    || 0;
-      const commentCount= p.comments?.[0]?.count || 0;
-      const teacherBoost = taughtSubjects.has(p.category) ? 20 : 0;
-      const score       = likeCount * 3 + commentCount * 5
-                        + Math.max(0, 10 - daysOld)
-                        + (xpMap.get(p.user_id) || 0) / 50
-                        + teacherBoost;
-      return { ...p, _score: score };
-    }).sort((a, b) => b._score - a._score);
-
-    allProofs = scored;
+    allProofs = sorted;
     renderFeed(currentFilter === "all" ? allProofs : allProofs.filter(p => p.category === currentFilter));
     renderSubjectMiniRanking(currentFilter);
     renderMyStats();
@@ -2302,7 +2290,7 @@
     const myLikes = myProofs.reduce((s, p) => s + (p.likes?.[0]?.count || 0), 0);
 
     // Ranking — wszyscy z aktywnymi proofami (odpowiada głównemu leaderboard
-    // dla score>0; userzy z 0 proofami nie wpływają na pozycje aktywnych).
+    // dla likes>0; userzy z 0 lajkami zajmują dalsze pozycje wg liczby proofów).
     const allStats = new Map();
     allProofs.forEach(p => {
       const cur = allStats.get(p.user_id) || { proofs: 0, likes: 0 };
@@ -2311,8 +2299,8 @@
       allStats.set(p.user_id, cur);
     });
     const ranked = [...allStats.entries()]
-      .map(([id, s]) => ({ id, score: s.proofs * 5 + s.likes * 2 }))
-      .sort((a, b) => b.score - a.score);
+      .map(([id, s]) => ({ id, score: s.likes, proofs: s.proofs }))
+      .sort((a, b) => b.score - a.score || b.proofs - a.proofs);
     const myIdx = ranked.findIndex(r => r.id === user.id);
     const myRank = myIdx >= 0 ? myIdx + 1 : null;
 
@@ -2428,10 +2416,10 @@
         return {
           id, username: prof.username, avatar_url: prof.avatar_url,
           proofs: s.proofs, likes: s.likes,
-          score: s.proofs * 5 + s.likes * 2,
+          score: s.likes,
         };
       })
-      .sort((a, b) => b.score - a.score)
+      .sort((a, b) => b.score - a.score || b.proofs - a.proofs)
       .slice(0, 5);
 
     const medals = ["🥇", "🥈", "🥉"];
@@ -2441,7 +2429,7 @@
     wrap.innerHTML = `
       <div class="subject-mini-ranking-header">
         <div class="subject-mini-ranking-title">🏆 Top 5 — ${escapeHtml(label)}</div>
-        <div class="subject-mini-ranking-sub">proofy×5 + lajki×2</div>
+        <div class="subject-mini-ranking-sub">po liczbie lajków</div>
       </div>
       <ol class="subject-mini-list">
         ${ranked.map((e, i) => `
@@ -2692,8 +2680,8 @@
       avatar_url: p.avatar_url || null,
       proofs:     proofCounts.get(p.id) || 0,
       likes:      likeCounts.get(p.id)  || 0,
-      score:      (likeCounts.get(p.id) || 0) * 2 + (proofCounts.get(p.id) || 0) * 5,
-    })).sort((a, b) => b.score - a.score);
+      score:      likeCounts.get(p.id)  || 0,
+    })).sort((a, b) => b.score - a.score || b.proofs - a.proofs);
 
     const avatarHtml = (entry) => entry.avatar_url
       ? `<img src="${escapeHtml(entry.avatar_url)}" alt="" />`
@@ -2715,7 +2703,7 @@
         </div>
         <div class="rank-score-box">
           <span class="rank-score">${entry.score}</span>
-          <span class="rank-score-label">punktów</span>
+          <span class="rank-score-label">lajków</span>
         </div>
       `;
       listEl.appendChild(li);
